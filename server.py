@@ -1,29 +1,33 @@
-# server.py
-# FastAPI mini-API for AFCOTEC doc generator
-# DB: PostgreSQL (recommended: Neon.tech free tier)
+# server.py (psycopg3-compatible)
 import os
 from datetime import datetime
-from typing import Optional, List
+from typing import Optional
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
-from sqlalchemy import (
-    create_engine, Column, Integer, String, DateTime, Text, UniqueConstraint, select
-)
+from sqlalchemy import create_engine, text, Column, Integer, String, DateTime, Text, UniqueConstraint
 from sqlalchemy.orm import sessionmaker, declarative_base
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy import func
-from sqlalchemy.orm import Session
-from sqlalchemy import text
 
-DATABASE_URL = os.getenv("DATABASE_URL")  # e.g., postgresql://user:pass@host/db
+# ----- Database URL normalization -----
+raw_url = os.getenv("DATABASE_URL", "")
+if not raw_url:
+    raise RuntimeError("Set env var DATABASE_URL to your Postgres connection string (Neon).")
 
-if not DATABASE_URL:
-    raise RuntimeError("Set env var DATABASE_URL to your Postgres connection string. (e.g. from Neon)")
+# Force SSL
+if "sslmode=" not in raw_url:
+    sep = "&" if "?" in raw_url else "?"
+    raw_url = f"{raw_url}{sep}sslmode=require"
 
-engine = create_engine(DATABASE_URL, pool_pre_ping=True)
-SessionLocal = sessionmaker(bind=engine, expire_on_commit=False)
+# Use psycopg3 driver explicitly to avoid psycopg2 on Python 3.13
+if raw_url.startswith("postgresql://"):
+    DATABASE_URL = raw_url.replace("postgresql://", "postgresql+psycopg://", 1)
+else:
+    DATABASE_URL = raw_url
+
+engine = create_engine(DATABASE_URL, pool_pre_ping=True, future=True)
+SessionLocal = sessionmaker(bind=engine, expire_on_commit=False, future=True)
 Base = declarative_base()
 
 # ---------- Models ----------
@@ -117,8 +121,6 @@ def formatted_number(next_val: int, prefix: str, padding: int) -> str:
 def take_next_number(payload: TakeNextIn):
     doc_type = payload.doc_type
     with SessionLocal() as db:
-        # SERIALIZABLE or explicit row-level lock
-        # Using FOR UPDATE to avoid race conditions
         db.execute(text("BEGIN"))
         row = db.execute(text("SELECT type, next, prefix, padding FROM counters WHERE type=:t FOR UPDATE"), {"t": doc_type}).fetchone()
         if not row:
@@ -131,7 +133,7 @@ def take_next_number(payload: TakeNextIn):
         db.commit()
         return {"formatted": formatted}
 
-@app.get("/counters", response_model=List[CounterOut])
+@app.get("/counters", response_model=list[CounterOut])
 def list_counters():
     with SessionLocal() as db:
         rows = db.execute(text("SELECT type, next, prefix, padding FROM counters ORDER BY type")).fetchall()
@@ -147,7 +149,7 @@ def set_counter(doc_type: str, c: CounterIn):
         db.commit()
         return {"type": doc_type, **c.model_dump()}
 
-@app.get("/clients", response_model=List[ClientOut])
+@app.get("/clients", response_model=list[ClientOut])
 def list_clients():
     with SessionLocal() as db:
         rows = db.execute(text("SELECT id,name,address,email,phone FROM clients ORDER BY name")).fetchall()
@@ -186,7 +188,7 @@ def add_history(h: HistoryIn):
         db.commit()
         return {"id": r[0], "ts": r[1], **h.model_dump()}
 
-@app.get("/history", response_model=List[HistoryOut])
+@app.get("/history", response_model=list[HistoryOut])
 def list_history(limit: int = 200):
     with SessionLocal() as db:
         rows = db.execute(text("""
